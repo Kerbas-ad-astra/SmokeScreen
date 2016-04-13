@@ -75,6 +75,8 @@ public class PersistentKSPParticleEmitter
 
     public float sizeClamp = 50;
 
+    public bool clampXYstart = false;
+
     // The initial velocity of the particles will be offset by a random amount
     // lying in a disk perpendicular to the mean initial velocity whose radius
     // is randomOffsetMaxRadius. This is similar to Unity's 'Random Velocity'
@@ -84,6 +86,12 @@ public class PersistentKSPParticleEmitter
 
     //Similar to randomInitalVelocityOffsetMaxRadius, cleaned a little 
     public float randConeEmit = 0.0f;
+
+    //Additive random position offset
+    public float vRandPosOffset = 0.0f;
+
+    //Additive non-random position offset
+    public float vPosOffset = 0.0f;
 
     //xyForce multiplicatively damps non-axis (x,y) motion, leaving axis 
     //motion (z) untouched.
@@ -194,8 +202,16 @@ public class PersistentKSPParticleEmitter
         
         //For randConeEmit:
         //Only generate a random vector on every other particle, for the in-between particles, negate the disk.
-        bool coneToggle = true;
+        bool toggle = true;
         Vector2 disk = new Vector2 (0,0);
+        //For startSpread
+
+        double logGrowConst = TimeWarp.fixedDeltaTime * logarithmicGrow * logarithmicGrowScale;
+        float linGrowConst = (float)(TimeWarp.fixedDeltaTime * linearGrow * averageSize);
+
+        Transform peTransform = pe.transform;
+
+        Vector3d frameVel = Krakensbane.GetFrameVelocity();
 
         //Step through all the particles:
         for (int j = 0; j < particles.Length; j++)
@@ -215,81 +231,91 @@ public class PersistentKSPParticleEmitter
                 }
             }
 
+            
             if (particle.energy > 0)
             {
-                Vector3d pPos = pe.useWorldSpace
-                    ? particle.position
-                    : pe.transform.TransformPoint(particle.position);
-                
                 //Slight methodology change to avoid duplicating if statements:
                 Vector3d pVel;
+                Vector3d pPos;
                 if (pe.useWorldSpace)
                 {
-                    pVel = particle.velocity;
+                    pVel = particle.velocity + frameVel;
+                    pPos = particle.position;
                 }
-                else if (!pe.useWorldSpace && particle.energy == particle.startEnergy && (randConeEmit != 0))
+                else if (!pe.useWorldSpace && particle.energy == particle.startEnergy)
                 {
-                    Vector3 lVel = new Vector3(0, 0, 1); ;
+                    Vector3 lVel = new Vector3(0, 0, 1);
+                    Vector3 lPos = particle.position;
+
                     // Adjust initial velocity to make a cone.  Only perform if pe.useWorldSpace
                     // is true, and we have a randConeEmit set.
                     //Produce a random vector within "angle" of the original vector.
                     //The maximum producible cone is 90 degrees when randConeEmit is very large.
                     //Could open up more if we used trig, but it'd be less efficient.
-                    if (coneToggle)
+
+                    if (toggle)
                     {
                         disk = Random.insideUnitCircle * randConeEmit;
-                        coneToggle = false;
+                        toggle = false;
                     }
                     else
                     {
                         disk *= -1;
-                        coneToggle = true;
+                        toggle = true;
                     }
                     lVel.x = disk.x;
                     lVel.y = disk.y;
                     lVel = Vector3.Normalize(lVel);
                     lVel *= Vector3.Magnitude(particle.velocity);
 
-                    pVel = pe.transform.TransformDirection(lVel)
-                                + Krakensbane.GetFrameVelocity();
+                    //Adjust initial position back along its position, if required.
+                    //Apply a random offset if vRandOffset != 0, else apply zero.
+                    float randoff = (vRandPosOffset != 0)? Random.Range(0, vRandPosOffset) : 0;
+                    lPos += Vector3.Normalize(lVel) * (randoff + vPosOffset);
+
+                    //Finalize position and velocity
+                    pPos = peTransform.TransformPoint(lPos);
+                    pVel = peTransform.TransformDirection(lVel)
+                                + frameVel;
                 }
                 else if (!pe.useWorldSpace && particle.energy != particle.startEnergy)
                 {
-                    pVel = pe.transform.TransformDirection(particle.velocity.x * xyForce,
+                    pPos = peTransform.TransformPoint(particle.position);
+                    pVel = peTransform.TransformDirection(particle.velocity.x * xyForce,
                                                            particle.velocity.y * xyForce,
                                                            particle.velocity.z * zForce)
-                                + Krakensbane.GetFrameVelocity();
+                                + frameVel;
                 }
                 else
                 {
-                    pVel = pe.transform.TransformDirection(particle.velocity)
-                                + Krakensbane.GetFrameVelocity();
+                    pPos = peTransform.TransformPoint(particle.position);
+                    pVel = peTransform.TransformDirection(particle.velocity) + frameVel;
                 }
+                
                 // try-finally block to ensure we set the particle velocities correctly in the end.
                 try
                 {
                     // Fixed update is not the best place to update the size but the particles array copy is
                     // slow so doing each frame would be worse
-
+                    
                     // No need to waste time doing a division if the result is 0.
                     if (logarithmicGrow != 0.0)
                     {
                         // Euler integration of the derivative of Log(logarithmicGrowth * t + 1) + 1.
                         // This might look weird.
-                        particle.size +=
-                            (float)
-                                (((TimeWarp.fixedDeltaTime * logarithmicGrow * logarithmicGrowScale)
-                                  / (1 + (particle.startEnergy - particle.energy) * logarithmicGrow)) * averageSize);
+                        
+                        particle.size += (float) ((logGrowConst / (1 + (particle.startEnergy - particle.energy) * logarithmicGrow)) * averageSize);
                     }
                     if (linearGrow != 0.0)
                     {
-                        particle.size += (float)(TimeWarp.fixedDeltaTime * linearGrow * averageSize);
+                        particle.size += linGrowConst;
                     }
-
+                    
                     particle.size = Mathf.Min(particle.size, sizeClamp);
 
                     if (particle.energy == particle.startEnergy)
                     {
+                        
                         if (pe.useWorldSpace)
                         {
                             // Uniformly scatter newly emitted particles along the emitter's trajectory in order to
@@ -354,12 +380,11 @@ public class PersistentKSPParticleEmitter
                 finally
                 {
                     particle.velocity = (pe.useWorldSpace
-                        ? (Vector3)(pVel - Krakensbane.GetFrameVelocity())
-                        : pe.transform.InverseTransformDirection(
-                            pVel - Krakensbane.GetFrameVelocity()));
+                        ? (Vector3)(pVel - frameVel)
+                        : peTransform.InverseTransformDirection(pVel - frameVel));
                     particle.position = pe.useWorldSpace
                         ? (Vector3)pPos
-                        : pe.transform.InverseTransformPoint(pPos);
+                        : peTransform.InverseTransformPoint(pPos);
                 }
             }
             particles[j] = particle;
@@ -411,8 +436,8 @@ public class PersistentKSPParticleEmitter
             {
                 Vector3 unitTangent = (hit.normal.x == 0 && hit.normal.y == 0)
                     ? new Vector3(1, 0, 0)
-                    : Vector3.Exclude(hit.normal, new Vector3(0, 0, 1)).normalized;
-                Vector3 hVel = Vector3.Exclude(hit.normal, pVel);
+                    : Vector3.ProjectOnPlane(new Vector3(0, 0, 1), hit.normal).normalized;
+                 Vector3 hVel = Vector3.ProjectOnPlane(pVel, hit.normal);
                 Vector3 reflectedNormalVelocity = hVel - pVel;
                 float residualFlow = reflectedNormalVelocity.magnitude * (1 - collideRatio);
 

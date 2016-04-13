@@ -56,6 +56,8 @@ public class ModelMultiParticlePersistFX : EffectBehaviour
 
     [Persistent] public float fixedScale = 1;
 
+    [Persistent] public float emissionMult = 1;
+
     [Persistent] public float sizeClamp = 50;
 
     // Initial density of the particle seen as sphere of radius size of perfect
@@ -124,6 +126,10 @@ public class ModelMultiParticlePersistFX : EffectBehaviour
     public MultiInputCurve initalVelocityOffsetMaxRadius;
 
     public MultiInputCurve randConeEmit;
+
+    public MultiInputCurve vRandPosOffset;
+
+    public MultiInputCurve vPosOffset;
 
     public MultiInputCurve xyForce;
 
@@ -334,7 +340,7 @@ public class ModelMultiParticlePersistFX : EffectBehaviour
         }
 
         inputs[(int)MultiInputCurve.Inputs.power] = power;
-        inputs[(int)MultiInputCurve.Inputs.density] = atmDensity;
+        inputs[(int)MultiInputCurve.Inputs.density] = (float)Math.Pow(atmDensity,SmokeScreenConfig.Instance.atmDensityExp);
         inputs[(int)MultiInputCurve.Inputs.mach] = surfaceVelMach;
         inputs[(int)MultiInputCurve.Inputs.parttemp] = partTemp;
         inputs[(int)MultiInputCurve.Inputs.externaltemp] = externalTemp;
@@ -349,6 +355,9 @@ public class ModelMultiParticlePersistFX : EffectBehaviour
         {
             PersistentKSPParticleEmitter pkpe = persistentEmitters[i];
 
+            if (pkpe.go == null)
+                continue;
+
             //pkpe.pe.useWorldSpace
             float finalScale = fixedScale * specialScale;
 
@@ -358,7 +367,7 @@ public class ModelMultiParticlePersistFX : EffectBehaviour
             pkpe.pe.minSize = Mathf.Min(pkpe.minSizeBase * sizePower, finalSizeClamp);
             pkpe.pe.maxSize = Mathf.Min(pkpe.maxSizeBase * sizePower, finalSizeClamp);
 
-            float emissionPower = emission.Value(inputs);
+            float emissionPower = emission.Value(inputs) * emissionMult;
             pkpe.pe.minEmission = Mathf.FloorToInt(pkpe.minEmissionBase * emissionPower);
             pkpe.pe.maxEmission = Mathf.FloorToInt(pkpe.maxEmissionBase * emissionPower);
 
@@ -387,6 +396,9 @@ public class ModelMultiParticlePersistFX : EffectBehaviour
             pkpe.xyForce = xyForce.Value(inputs);
             pkpe.zForce = zForce.Value(inputs);
 
+            pkpe.vRandPosOffset = vRandPosOffset.Value(inputs);
+            pkpe.vPosOffset = vPosOffset.Value(inputs);
+
             pkpe.physical = physical && !SmokeScreenConfig.Instance.globalPhysicalDisable;
             pkpe.initialDensity = initialDensity;
             pkpe.dragCoefficient = dragCoefficient;
@@ -408,8 +420,8 @@ public class ModelMultiParticlePersistFX : EffectBehaviour
                 {
                     float a =
                         Mathf.Clamp01(alpha.Value(inputs) *
-                                      (1 - linAlphaDecay.Value(inputs) * (t / 4) -
-                                       Mathf.Log(logAlphaDecay.Value(inputs) * (t / 4) + 1)));
+                                      (1 - linAlphaDecay.Value(inputs) * (t / 4f) -
+                                       Mathf.Log(logAlphaDecay.Value(inputs) * (t / 4f) + 1)));
                     cols[t] = new Color(a, a, a, a);
                 }
 
@@ -439,13 +451,16 @@ public class ModelMultiParticlePersistFX : EffectBehaviour
     public void Update()
     {
         //Print("Update");
-        if (persistentEmitters == null)
+        if (persistentEmitters == null || Camera.main == null)
         {
             return;
         }
 
         for (int i = 0; i < persistentEmitters.Count; i++)
         {
+            if (persistentEmitters[i].go == null)
+                continue;
+
             // using Camera.main will mess up anything multi cam but using current require adding a OnWillRenderObject() to the ksp particle emitter GameObject (? not tested)
             float currentAngle = Vector3.Angle(
                 -Camera.main.transform.forward,
@@ -578,10 +593,11 @@ public class ModelMultiParticlePersistFX : EffectBehaviour
 
     private static void DisableCollider(GameObject go)
     {
-        if (go.collider != null)
+        var collider = go.GetComponent<Collider>();
+        if (collider != null)
         {
             //Print("Found one collider and disabled it");
-            go.collider.enabled = false;
+            collider.enabled = false;
         }
 
         for (int i = 0; i < go.transform.childCount; i++)
@@ -593,18 +609,17 @@ public class ModelMultiParticlePersistFX : EffectBehaviour
         }
     }
 
+    // TODO : I learned to do proper serialization since then. I might want to do it instead of that mess
     public void Backup(ConfigNode node)
     {
         node_backup = SmokeScreenUtil.WriteRootNode(node);
-
         //print("Backup node_backup is\n " + node_backup.Replace(Environment.NewLine, Environment.NewLine + "ModelMultiParticlePersistFX "));
     }
 
     public void Restore()
     {
         //print("Restore node_backup is\n " + node_backup.Replace(Environment.NewLine, Environment.NewLine + "ModelMultiParticlePersistFX "));
-        string[] text = node_backup.Split(new[] {"\n"}, StringSplitOptions.None);
-        ConfigNode node = SmokeScreenUtil.RecurseFormat(SmokeScreenUtil.PreFormatConfig(text));
+        ConfigNode node = ConfigNode.Parse(node_backup);
         OnLoad(node);
     }
 
@@ -630,6 +645,8 @@ public class ModelMultiParticlePersistFX : EffectBehaviour
         initalVelocityOffsetMaxRadius = new MultiInputCurve("initalVelocityOffsetMaxRadius", true);
         sizeClampCurve = new MultiInputCurve("sizeClamp", true);
         randConeEmit = new MultiInputCurve("randConeEmit", true);
+        vRandPosOffset = new MultiInputCurve("vRandPosOffset", true);
+        vPosOffset = new MultiInputCurve("vPosOffset", true);
         xyForce = new MultiInputCurve("xyForce", false);
         zForce = new MultiInputCurve("zForce", false);
 
@@ -651,6 +668,8 @@ public class ModelMultiParticlePersistFX : EffectBehaviour
         initalVelocityOffsetMaxRadius.Load(node);
         sizeClampCurve.Load(node);
         randConeEmit.Load(node);
+        vRandPosOffset.Load(node);
+        vPosOffset.Load(node);
         xyForce.Load(node);
         zForce.Load(node);
 
@@ -811,6 +830,24 @@ public class ModelMultiParticlePersistFX : EffectBehaviour
             Print("OnSave randConeEmit is null");
         }
 
+        if (vRandPosOffset != null)
+        {
+            vRandPosOffset.Save(node);
+        }
+        else
+        {
+            Print("OnSave vRandPosOffset is null");
+        }
+
+        if (vPosOffset != null)
+        {
+            vPosOffset.Save(node);
+        }
+        else
+        {
+            Print("OnSave vPosOffset is null");
+        }
+
         if (xyForce != null)
         {
             xyForce.Save(node);
@@ -948,8 +985,7 @@ public class ModelMultiParticlePersistFX : EffectBehaviour
             // Apply the text
             if (GUILayout.Button("Apply"))
             {
-                string[] text = nodeText.Split(new[] {"\n"}, StringSplitOptions.None);
-                ConfigNode node = SmokeScreenUtil.RecurseFormat(SmokeScreenUtil.PreFormatConfig(text));
+                ConfigNode node = ConfigNode.Parse(nodeText);
                 OnLoad(node);
             }
 
@@ -1020,6 +1056,8 @@ public class ModelMultiParticlePersistFX : EffectBehaviour
         min = Mathf.Min(min, initalVelocityOffsetMaxRadius.minInput[id]);
         min = Mathf.Min(min, sizeClampCurve.minInput[id]);
         min = Mathf.Min(min, randConeEmit.minInput[id]);
+        min = Mathf.Min(min, vRandPosOffset.minInput[id]);
+        min = Mathf.Min(min, vPosOffset.minInput[id]);
         min = Mathf.Min(min, xyForce.minInput[id]);
         min = Mathf.Min(min, zForce.minInput[id]);
 
@@ -1046,6 +1084,8 @@ public class ModelMultiParticlePersistFX : EffectBehaviour
         max = Mathf.Max(max, initalVelocityOffsetMaxRadius.maxInput[id]);
         max = Mathf.Max(max, sizeClampCurve.maxInput[id]);
         max = Mathf.Max(max, randConeEmit.minInput[id]);
+        max = Mathf.Max(max, vRandPosOffset.minInput[id]);
+        max = Mathf.Max(max, vPosOffset.minInput[id]);
         max = Mathf.Max(max, xyForce.minInput[id]);
         max = Mathf.Max(max, zForce.minInput[id]);
 
